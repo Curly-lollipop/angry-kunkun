@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>愤怒的坤坤 · 弹弓弹射</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; background: #1b2430; font-family: "PingFang SC", "Microsoft YaHei", sans-serif; }
+  body { display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; padding: 12px; }
+  h1 { color: #f4d35e; font-size: 20px; margin-bottom: 8px; letter-spacing: 2px; }
+  #wrap { width: 100%; max-width: 960px; }
+  canvas { display: block; width: 100%; height: auto; border-radius: 12px; box-shadow: 0 12px 40px rgba(0,0,0,.5); background: #87ceeb; touch-action: none; cursor: crosshair; }
+  #bar { display: flex; gap: 16px; color: #e8eef5; font-size: 14px; padding: 10px 4px; flex-wrap: wrap; }
+  #bar b { color: #f4d35e; }
+  #overlay {
+    position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    background: rgba(15,20,28,.72); border-radius: 12px; color: #fff; gap: 14px; text-align: center;
+  }
+  #overlay h2 { font-size: 34px; letter-spacing: 3px; }
+  #overlay p { color: #cdd7e1; font-size: 15px; }
+  #overlay button {
+    padding: 10px 28px; font-size: 16px; border: none; border-radius: 24px; cursor: pointer;
+    background: #f4d35e; color: #1b2430; font-weight: 700; letter-spacing: 1px;
+  }
+  #stage { position: relative; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+  <h1>愤怒的坤坤 · 弹弓弹射</h1>
+  <div id="wrap">
+    <div id="bar">
+      <span>关卡：<b id="lv">1</b></span>
+      <span>剩余弹药：<b id="ammo">3</b></span>
+      <span>剩余目标：<b id="targets">1</b></span>
+      <span style="margin-left:auto">按住弹弓向后拉，松手发射</span>
+    </div>
+    <div id="stage">
+      <canvas id="cv" width="960" height="540"></canvas>
+      <div id="overlay" class="hidden">
+        <h2 id="ovTitle">胜利</h2>
+        <p id="ovText"></p>
+        <button id="ovBtn">下一关</button>
+      </div>
+    </div>
+  </div>
+
+<script>
+(() => {
+  const cv = document.getElementById('cv');
+  const ctx = cv.getContext('2d');
+  const W = 960, H = 540, GROUND = 490;
+  const ANCHOR = { x: 150, y: 430 };
+  const MAXPULL = 95;
+  const G = 0.38;
+
+  // ---------- 关卡数据 ----------
+  // blocks: {x,y,w,h,type:'wood'|'stone'}  静态障碍
+  // targets: {x,y,r,hp}  紫金24号目标
+  const LEVELS = [
+    {
+      ammo: 3,
+      blocks: [ {x: 700, y: 430, w: 180, h: 18, type:'wood'} ],
+      targets: [ {x: 790, y: 396, r: 26, hp: 2} ]
+    },
+    {
+      ammo: 3,
+      blocks: [
+        {x: 660, y: 450, w: 30, h: 40, type:'stone'},
+        {x: 660, y: 410, w: 160, h: 18, type:'wood'},
+        {x: 720, y: 360, w: 30, h: 50, type:'stone'}
+      ],
+      targets: [ {x: 700, y: 376, r: 24, hp: 2}, {x: 800, y: 455, r: 24, hp: 2} ]
+    }
+  ];
+
+  let level = 0;
+  let state = 'idle';       // idle | aiming | flying | done
+  let ball = null;
+  let aiming = null;        // {x,y}
+  let blocks = [], targets = [], ammo = 3;
+
+  const $lv = document.getElementById('lv');
+  const $ammo = document.getElementById('ammo');
+  const $targets = document.getElementById('targets');
+  const overlay = document.getElementById('overlay');
+  const ovTitle = document.getElementById('ovTitle');
+  const ovText = document.getElementById('ovText');
+  const ovBtn = document.getElementById('ovBtn');
+
+  function loadLevel(i) {
+    const L = LEVELS[i];
+    level = i;
+    ammo = L.ammo;
+    blocks = L.blocks.map(b => ({...b}));
+    targets = L.targets.map(t => ({...t}));
+    ball = null;
+    state = 'idle';
+    updateHud();
+    overlay.classList.add('hidden');
+  }
+
+  function updateHud() {
+    $lv.textContent = level + 1;
+    $ammo.textContent = ammo;
+    $targets.textContent = targets.filter(t => t.hp > 0).length;
+  }
+
+  // ---------- 坐标换算（兼容缩放 / 触屏） ----------
+  function toCanvas(e) {
+    const rect = cv.getBoundingClientRect();
+    const src = e.touches ? e.touches[0] : e;
+    return {
+      x: (src.clientX - rect.left) * (W / rect.width),
+      y: (src.clientY - rect.top) * (H / rect.height)
+    };
+  }
+
+  function startAim(e) {
+    if (state !== 'idle') return;
+    const p = toCanvas(e);
+    const dx = p.x - ANCHOR.x, dy = p.y - ANCHOR.y;
+    if (Math.hypot(dx, dy) < 130) {
+      state = 'aiming';
+      aiming = clampPull(p);
+    }
+  }
+  function moveAim(e) {
+    if (state !== 'aiming') return;
+    aiming = clampPull(toCanvas(e));
+  }
+  function endAim() {
+    if (state !== 'aiming') return;
+    const dx = ANCHOR.x - aiming.x;
+    const dy = ANCHOR.y - aiming.y;
+    ball = {
+      x: ANCHOR.x, y: ANCHOR.y, r: 17,
+      vx: dx * 0.16, vy: dy * 0.16,
+      trail: []
+    };
+    ammo--;
+    state = 'flying';
+    aiming = null;
+    updateHud();
+  }
+  function clampPull(p) {
+    let dx = p.x - ANCHOR.x, dy = p.y - ANCHOR.y;
+    const d = Math.hypot(dx, dy);
+    if (d > MAXPULL) { dx = dx / d * MAXPULL; dy = dy / d * MAXPULL; }
+    return { x: ANCHOR.x + dx, y: ANCHOR.y + dy };
+  }
+
+  cv.addEventListener('mousedown', startAim);
+  cv.addEventListener('mousemove', moveAim);
+  window.addEventListener('mouseup', endAim);
+  cv.addEventListener('touchstart', e => { e.preventDefault(); startAim(e); }, {passive:false});
+  cv.addEventListener('touchmove', e => { e.preventDefault(); moveAim(e); }, {passive:false});
+  cv.addEventListener('touchend', e => { e.preventDefault(); endAim(); }, {passive:false});
+
+  // ---------- 物理 ----------
+  function collideBlock(b, blk) {
+    // 圆心到矩形最近点
+    const nx = Math.max(blk.x, Math.min(b.x, blk.x + blk.w));
+    const ny = Math.max(blk.y, Math.min(b.y, blk.y + blk.h));
+    let dx = b.x - nx, dy = b.y - ny;
+    let d = Math.hypot(dx, dy);
+    if (d < b.r) {
+      if (d === 0) { dx = 0; dy = -1; d = 1; }
+      const ux = dx / d, uy = dy / d;
+      b.x = nx + ux * b.r;
+      b.y = ny + uy * b.r;
+      const vn = b.vx * ux + b.vy * uy;
+      if (vn < 0) {
+        const rest = 0.35;
+        b.vx -= (1 + rest) * vn * ux;
+        b.vy -= (1 + rest) * vn * uy;
+        b.vx *= 0.96; b.vy *= 0.96;
+      }
+      return true;
+    }
+    return false;
+  }
+
+  function step() {
+    if (state === 'flying' && ball) {
+      ball.vy += G;
+      ball.x += ball.vx;
+      ball.y += ball.vy;
+      ball.trail.push({x: ball.x, y: ball.y});
+      if (ball.trail.length > 18) ball.trail.shift();
+
+      // 障碍碰撞
+      for (const blk of blocks) collideBlock(ball, blk);
+
+      // 目标碰撞（圆-圆）
+      for (const t of targets) {
+        if (t.hp <= 0) continue;
+        const d = Math.hypot(ball.x - t.x, ball.y - t.y);
+        if (d < ball.r + t.r) {
+          t.hp--;
+          t.flash = 12;
+          const nx = (ball.x - t.x) / (d || 1), ny = (ball.y - t.y) / (d || 1);
+          ball.vx = nx * 4; ball.vy = ny * 4 - 2;
+          updateHud();
+        }
+      }
+
+      // 地面 / 出界
+      if (ball.y > GROUND - ball.r) {
+        ball.y = GROUND - ball.r;
+        ball.vy *= -0.4;
+        ball.vx *= 0.8;
+        if (Math.abs(ball.vy) < 0.6) ball.vy = 0;
+      }
+      if (ball.x < -60 || ball.x > W + 60 || ball.y > H + 60) {
+        endBall();
+      } else if (Math.abs(ball.vx) < 0.08 && ball.vy === 0 && ball.y >= GROUND - ball.r - 0.5) {
+        endBall();
+      }
+    }
+
+    for (const t of targets) if (t.flash > 0) t.flash--;
+
+    if (state === 'flying') {
+      if (targets.every(t => t.hp <= 0)) return finish(true);
+      if (ammo === 0 && !ball) return finish(false);
+    }
+  }
+
+  function endBall() {
+    ball = null;
+    state = ammo > 0 ? 'idle' : 'done';
+    updateHud();
+    if (ammo === 0 && targets.some(t => t.hp > 0)) finish(false);
+  }
+
+  function finish(win) {
+    state = 'done';
+    overlay.classList.remove('hidden');
+    if (win) {
+      ovTitle.textContent = '漂亮！全部命中';
+      ovText.textContent = level + 1 === LEVELS.length ? '你通过了全部关卡' : '准备进入下一关';
+      ovBtn.textContent = level + 1 === LEVELS.length ? '再玩一次' : '下一关';
+    } else {
+      ovTitle.textContent = '弹药耗尽';
+      ovText.textContent = '差一点，重新挑战这一关';
+      ovBtn.textContent = '重试本关';
+    }
+  }
+
+  ovBtn.addEventListener('click', () => {
+    if (state !== 'done') return;
+    const win = targets.every(t => t.hp <= 0);
+    if (win && level + 1 < LEVELS.length) loadLevel(level + 1);
+    else loadLevel(win ? 0 : level);
+  });
+
+  // ---------- 绘制 ----------
+  function drawSky() {
+    const grd = ctx.createLinearGradient(0, 0, 0, GROUND);
+    grd.addColorStop(0, '#7ec8f0');
+    grd.addColorStop(1, '#dff1e0');
+    ctx.fillStyle = grd;
+    ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = 'rgba(255,236,150,.9)';
+    ctx.beginPath(); ctx.arc(860, 80, 34, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#6aa84f';
+    ctx.fillRect(0, GROUND, W, H - GROUND);
+    ctx.fillStyle = '#8b5a2b';
+    ctx.fillRect(0, GROUND, W, 10);
+  }
+
+  function drawSlingshot() {
+    ctx.strokeStyle = '#6b3f1d';
+    ctx.lineWidth = 8; ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(ANCHOR.x, GROUND);
+    ctx.lineTo(ANCHOR.x, ANCHOR.y + 10);
+    ctx.moveTo(ANCHOR.x, ANCHOR.y);
+    ctx.lineTo(ANCHOR.x - 22, ANCHOR.y - 26);
+    ctx.moveTo(ANCHOR.x, ANCHOR.y);
+    ctx.lineTo(ANCHOR.x + 22, ANCHOR.y - 26);
+    ctx.stroke();
+  }
+
+  function drawBall(x, y, r) {
+    ctx.fillStyle = '#e87722';
+    ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = '#7a3d10'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(x - r, y); ctx.lineTo(x + r, y); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(x, y - r); ctx.lineTo(x, y + r); ctx.stroke();
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 18px sans-serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText('K', x, y + 1);
+  }
+
+  function drawAmmoBall() {
+    if (state === 'aiming' && aiming) drawBall(aiming.x, aiming.y, 17);
+    else if (state === 'idle') drawBall(ANCHOR.x, ANCHOR.y, 17);
+  }
+
+  function drawAimLine() {
+    if (state !== 'aiming') return;
+    const dx = ANCHOR.x - aiming.x, dy = ANCHOR.y - aiming.y;
+    ctx.setLineDash([6, 8]);
+    ctx.strokeStyle = 'rgba(255,255,255,.8)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(ANCHOR.x, ANCHOR.y);
+    ctx.lineTo(ANCHOR.x + dx * 1.4, ANCHOR.y + dy * 1.4);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  function drawBlocks() {
+    for (const b of blocks) {
+      ctx.fillStyle = b.type === 'stone' ? '#9aa3ab' : '#a5672f';
+      ctx.fillRect(b.x, b.y, b.w, b.h);
+      ctx.strokeStyle = 'rgba(0,0,0,.25)';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(b.x, b.y, b.w, b.h);
+    }
+  }
+
+  function drawTargets() {
+    for (const t of targets) {
+      if (t.hp <= 0) continue;
+      const flash = t.flash > 0;
+      ctx.fillStyle = flash ? '#ff5d73' : '#5b2d8e';
+      ctx.beginPath(); ctx.arc(t.x, t.y, t.r, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = '#f4d35e'; ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.arc(t.x, t.y, t.r, 0, Math.PI * 2); ctx.stroke();
+      ctx.fillStyle = '#fff';
+      ctx.font = 'bold 20px sans-serif';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText('24', t.x, t.y + 1);
+    }
+  }
+
+  function drawFlyingBall() {
+    if (!ball) return;
+    ctx.setLineDash([4, 6]);
+    ctx.strokeStyle = 'rgba(255,255,255,.5)';
+    for (let i = 1; i < ball.trail.length; i++) {
+      ctx.beginPath();
+      ctx.moveTo(ball.trail[i - 1].x, ball.trail[i - 1].y);
+      ctx.lineTo(ball.trail[i].x, ball.trail[i].y);
+      ctx.stroke();
+    }
+    ctx.setLineDash([]);
+    drawBall(ball.x, ball.y, ball.r);
+  }
+
+  function loop() {
+    step();
+    ctx.clearRect(0, 0, W, H);
+    drawSky();
+    drawBlocks();
+    drawTargets();
+    drawSlingshot();
+    drawAimLine();
+    drawAmmoBall();
+    drawFlyingBall();
+    requestAnimationFrame(loop);
+  }
+
+  loadLevel(0);
+  loop();
+})();
+</script>
+</body>
+</html>
