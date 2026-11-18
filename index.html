@@ -34,7 +34,7 @@
       <span>关卡：<b id="lv">1</b></span>
       <span>剩余弹药：<b id="ammo">3</b></span>
       <span>剩余目标：<b id="targets">1</b></span>
-      <span style="margin-left:auto">按住弹弓向后拉，松手发射</span>
+      <span style="margin-left:auto">按住弹弓向后拉，松手发射；砸倒积木也能命中目标</span>
     </div>
     <div id="stage">
       <canvas id="cv" width="960" height="540"></canvas>
@@ -55,9 +55,42 @@
   const MAXPULL = 95;
   const G = 0.38;
 
+  // ---------- 音效（Web Audio，无需外部文件） ----------
+  let AC = null;
+  function initAudio() {
+    if (!AC) AC = new (window.AudioContext || window.webkitAudioContext)();
+    if (AC.state === 'suspended') AC.resume();
+  }
+  function tone(freq, dur, type, vol, delay = 0) {
+    if (!AC) return;
+    const o = AC.createOscillator(), g = AC.createGain();
+    o.type = type; o.frequency.value = freq;
+    const t = AC.currentTime + delay;
+    g.gain.setValueAtTime(vol, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+    o.connect(g); g.connect(AC.destination);
+    o.start(t); o.stop(t + dur);
+  }
+  function noise(dur, vol, delay = 0, cutoff = 400) {
+    if (!AC) return;
+    const len = Math.floor(AC.sampleRate * dur);
+    const buf = AC.createBuffer(1, len, AC.sampleRate);
+    const data = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / len);
+    const src = AC.createBufferSource(); src.buffer = buf;
+    const f = AC.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = cutoff;
+    const g = AC.createGain(); g.gain.value = vol;
+    src.connect(f); f.connect(g); g.connect(AC.destination);
+    src.start(AC.currentTime + delay);
+  }
+  const sfxShoot = () => { noise(0.18, 0.22, 0, 900); tone(220, 0.15, 'sine', 0.12); };
+  const sfxHitBlock = () => { noise(0.12, 0.28, 0, 300); tone(90, 0.15, 'square', 0.14); };
+  const sfxHitTarget = () => { tone(880, 0.12, 'sine', 0.25); tone(1320, 0.1, 'sine', 0.15, 0.06); };
+  const sfxLand = () => noise(0.08, 0.15, 0, 200);
+  const sfxWin = () => [523, 659, 784, 1047].forEach((f, i) => tone(f, 0.22, 'sine', 0.2, i * 0.12));
+  const sfxLose = () => [400, 320, 240].forEach((f, i) => tone(f, 0.25, 'triangle', 0.16, i * 0.15));
+
   // ---------- 关卡数据 ----------
-  // blocks: {x,y,w,h,type:'wood'|'stone'}  静态障碍
-  // targets: {x,y,r,hp}  紫金24号目标
   const LEVELS = [
     {
       ammo: 3,
@@ -76,9 +109,9 @@
   ];
 
   let level = 0;
-  let state = 'idle';       // idle | aiming | flying | done
+  let state = 'idle';
   let ball = null;
-  let aiming = null;        // {x,y}
+  let aiming = null;
   let blocks = [], targets = [], ammo = 3;
 
   const $lv = document.getElementById('lv');
@@ -93,8 +126,11 @@
     const L = LEVELS[i];
     level = i;
     ammo = L.ammo;
-    blocks = L.blocks.map(b => ({...b}));
-    targets = L.targets.map(t => ({...t}));
+    blocks = L.blocks.map(b => ({
+      ...b, vx: 0, vy: 0, ang: 0, av: 0,
+      mass: b.type === 'stone' ? 3 : 1.2, landed: false
+    }));
+    targets = L.targets.map(t => ({...t, flash: 0}));
     ball = null;
     state = 'idle';
     updateHud();
@@ -107,7 +143,6 @@
     $targets.textContent = targets.filter(t => t.hp > 0).length;
   }
 
-  // ---------- 坐标换算（兼容缩放 / 触屏） ----------
   function toCanvas(e) {
     const rect = cv.getBoundingClientRect();
     const src = e.touches ? e.touches[0] : e;
@@ -118,6 +153,7 @@
   }
 
   function startAim(e) {
+    initAudio();
     if (state !== 'idle') return;
     const p = toCanvas(e);
     const dx = p.x - ANCHOR.x, dy = p.y - ANCHOR.y;
@@ -142,6 +178,7 @@
     ammo--;
     state = 'flying';
     aiming = null;
+    sfxShoot();
     updateHud();
   }
   function clampPull(p) {
@@ -158,28 +195,70 @@
   cv.addEventListener('touchmove', e => { e.preventDefault(); moveAim(e); }, {passive:false});
   cv.addEventListener('touchend', e => { e.preventDefault(); endAim(); }, {passive:false});
 
-  // ---------- 物理 ----------
-  function collideBlock(b, blk) {
-    // 圆心到矩形最近点
-    const nx = Math.max(blk.x, Math.min(b.x, blk.x + blk.w));
-    const ny = Math.max(blk.y, Math.min(b.y, blk.y + blk.h));
-    let dx = b.x - nx, dy = b.y - ny;
+  function stepBlock(b) {
+    b.vy += G;
+    b.x += b.vx;
+    b.y += b.vy;
+    b.ang += b.av;
+    const half = b.h / 2;
+    if (b.y + half > GROUND) {
+      b.y = GROUND - half;
+      if (!b.landed && Math.abs(b.vy) > 2) sfxLand();
+      b.landed = true;
+      b.vy *= -0.25;
+      b.vx *= 0.8;
+      b.av *= 0.85;
+    } else {
+      b.landed = false;
+    }
+    b.vx *= 0.995;
+    b.av *= 0.985;
+    if (Math.abs(b.vx) < 0.02) b.vx = 0;
+    if (Math.abs(b.av) < 0.002) b.av = 0;
+    if (b.x < -300 || b.x > W + 300) b.vx = 0;
+  }
+
+  function collideBlock(ball, blk) {
+    const cx = Math.max(blk.x, Math.min(ball.x, blk.x + blk.w));
+    const cy = Math.max(blk.y, Math.min(ball.y, blk.y + blk.h));
+    let dx = ball.x - cx, dy = ball.y - cy;
     let d = Math.hypot(dx, dy);
-    if (d < b.r) {
+    if (d < ball.r) {
       if (d === 0) { dx = 0; dy = -1; d = 1; }
       const ux = dx / d, uy = dy / d;
-      b.x = nx + ux * b.r;
-      b.y = ny + uy * b.r;
-      const vn = b.vx * ux + b.vy * uy;
+      ball.x = cx + ux * ball.r;
+      ball.y = cy + uy * ball.r;
+      const vn = ball.vx * ux + ball.vy * uy;
       if (vn < 0) {
         const rest = 0.35;
-        b.vx -= (1 + rest) * vn * ux;
-        b.vy -= (1 + rest) * vn * uy;
-        b.vx *= 0.96; b.vy *= 0.96;
+        ball.vx -= (1 + rest) * vn * ux;
+        ball.vy -= (1 + rest) * vn * uy;
+        ball.vx *= 0.96; ball.vy *= 0.96;
+        const impact = -vn;
+        blk.vx += ux * impact * 0.9 / blk.mass;
+        blk.vy += uy * impact * 0.9 / blk.mass;
+        const rx = ball.x - (blk.x + blk.w / 2);
+        const ry = ball.y - (blk.y + blk.h / 2);
+        blk.av += (rx * uy - ry * ux) * impact * 0.02 / blk.mass;
+        if (impact > 1.5) sfxHitBlock();
       }
       return true;
     }
     return false;
+  }
+
+  function rectCircle(b, t) {
+    const cx = Math.max(b.x, Math.min(t.x, b.x + b.w));
+    const cy = Math.max(b.y, Math.min(t.y, b.y + b.h));
+    return Math.hypot(t.x - cx, t.y - cy) < t.r;
+  }
+
+  function damageTarget(t) {
+    if (t.hp <= 0) return;
+    t.hp--;
+    t.flash = 12;
+    sfxHitTarget();
+    updateHud();
   }
 
   function step() {
@@ -190,33 +269,35 @@
       ball.trail.push({x: ball.x, y: ball.y});
       if (ball.trail.length > 18) ball.trail.shift();
 
-      // 障碍碰撞
       for (const blk of blocks) collideBlock(ball, blk);
 
-      // 目标碰撞（圆-圆）
       for (const t of targets) {
         if (t.hp <= 0) continue;
         const d = Math.hypot(ball.x - t.x, ball.y - t.y);
         if (d < ball.r + t.r) {
-          t.hp--;
-          t.flash = 12;
           const nx = (ball.x - t.x) / (d || 1), ny = (ball.y - t.y) / (d || 1);
           ball.vx = nx * 4; ball.vy = ny * 4 - 2;
-          updateHud();
+          damageTarget(t);
         }
       }
 
-      // 地面 / 出界
       if (ball.y > GROUND - ball.r) {
         ball.y = GROUND - ball.r;
         ball.vy *= -0.4;
         ball.vx *= 0.8;
         if (Math.abs(ball.vy) < 0.6) ball.vy = 0;
       }
-      if (ball.x < -60 || ball.x > W + 60 || ball.y > H + 60) {
-        endBall();
-      } else if (Math.abs(ball.vx) < 0.08 && ball.vy === 0 && ball.y >= GROUND - ball.r - 0.5) {
-        endBall();
+      if (ball.x < -60 || ball.x > W + 60 || ball.y > H + 60) endBall();
+      else if (Math.abs(ball.vx) < 0.08 && ball.vy === 0 && ball.y >= GROUND - ball.r - 0.5) endBall();
+    }
+
+    for (const blk of blocks) stepBlock(blk);
+    for (const blk of blocks) {
+      for (const t of targets) {
+        if (t.hp > 0 && rectCircle(blk, t)) {
+          blk.vx *= 0.5; blk.vy *= 0.5;
+          damageTarget(t);
+        }
       }
     }
 
@@ -239,10 +320,12 @@
     state = 'done';
     overlay.classList.remove('hidden');
     if (win) {
+      sfxWin();
       ovTitle.textContent = '漂亮！全部命中';
       ovText.textContent = level + 1 === LEVELS.length ? '你通过了全部关卡' : '准备进入下一关';
       ovBtn.textContent = level + 1 === LEVELS.length ? '再玩一次' : '下一关';
     } else {
+      sfxLose();
       ovTitle.textContent = '弹药耗尽';
       ovText.textContent = '差一点，重新挑战这一关';
       ovBtn.textContent = '重试本关';
@@ -256,7 +339,6 @@
     else loadLevel(win ? 0 : level);
   });
 
-  // ---------- 绘制 ----------
   function drawSky() {
     const grd = ctx.createLinearGradient(0, 0, 0, GROUND);
     grd.addColorStop(0, '#7ec8f0');
@@ -317,11 +399,15 @@
 
   function drawBlocks() {
     for (const b of blocks) {
+      ctx.save();
+      ctx.translate(b.x + b.w / 2, b.y + b.h / 2);
+      ctx.rotate(b.ang);
       ctx.fillStyle = b.type === 'stone' ? '#9aa3ab' : '#a5672f';
-      ctx.fillRect(b.x, b.y, b.w, b.h);
+      ctx.fillRect(-b.w / 2, -b.h / 2, b.w, b.h);
       ctx.strokeStyle = 'rgba(0,0,0,.25)';
       ctx.lineWidth = 2;
-      ctx.strokeRect(b.x, b.y, b.w, b.h);
+      ctx.strokeRect(-b.w / 2, -b.h / 2, b.w, b.h);
+      ctx.restore();
     }
   }
 
