@@ -11,8 +11,13 @@
   h1 { color: #f4d35e; font-size: 20px; margin-bottom: 8px; letter-spacing: 2px; }
   #wrap { width: 100%; max-width: 960px; }
   canvas { display: block; width: 100%; height: auto; border-radius: 12px; box-shadow: 0 12px 40px rgba(0,0,0,.5); background: #87ceeb; touch-action: none; cursor: crosshair; }
-  #bar { display: flex; gap: 16px; color: #e8eef5; font-size: 14px; padding: 10px 4px; flex-wrap: wrap; }
+  #bar { display: flex; gap: 16px; color: #e8eef5; font-size: 14px; padding: 10px 4px; flex-wrap: wrap; align-items: center; }
   #bar b { color: #f4d35e; }
+  #restartBtn {
+    padding: 6px 16px; font-size: 13px; border: none; border-radius: 16px; cursor: pointer;
+    background: #f4d35e; color: #1b2430; font-weight: 700; letter-spacing: 1px;
+  }
+  #restartBtn:hover { background: #ffd94a; }
   #overlay {
     position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
     background: rgba(15,20,28,.72); border-radius: 12px; color: #fff; gap: 14px; text-align: center;
@@ -35,6 +40,7 @@
       <span>剩余弹药：<b id="ammo">3</b></span>
       <span>剩余目标：<b id="targets">1</b></span>
       <span style="margin-left:auto">按住弹弓向后拉，松手发射；积木被击中后才会倒塌</span>
+      <button id="restartBtn">重开本关</button>
     </div>
     <div id="stage">
       <canvas id="cv" width="960" height="540"></canvas>
@@ -390,6 +396,8 @@
     if (win && level + 1 < LEVELS.length) loadLevel(level + 1);
     else loadLevel(win ? 0 : level);
   });
+
+  document.getElementById('restartBtn').addEventListener('click', () => loadLevel(level));
 
   function drawSky() {
     const grd = ctx.createLinearGradient(0, 0, 0, GROUND);
