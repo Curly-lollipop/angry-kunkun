@@ -31,10 +31,10 @@
   <h1>愤怒的坤坤 · 弹弓弹射</h1>
   <div id="wrap">
     <div id="bar">
-      <span>关卡：<b id="lv">1</b></span>
+      <span>关卡：<b id="lv">1</b>/<b id="lvTotal">5</b></span>
       <span>剩余弹药：<b id="ammo">3</b></span>
       <span>剩余目标：<b id="targets">1</b></span>
-      <span style="margin-left:auto">按住弹弓向后拉，松手发射；砸倒积木也能命中目标</span>
+      <span style="margin-left:auto">按住弹弓向后拉，松手发射；积木被击中后才会倒塌</span>
     </div>
     <div id="stage">
       <canvas id="cv" width="960" height="540"></canvas>
@@ -55,7 +55,6 @@
   const MAXPULL = 95;
   const G = 0.38;
 
-  // ---------- 音效（Web Audio，无需外部文件） ----------
   let AC = null;
   function initAudio() {
     if (!AC) AC = new (window.AudioContext || window.webkitAudioContext)();
@@ -90,21 +89,48 @@
   const sfxWin = () => [523, 659, 784, 1047].forEach((f, i) => tone(f, 0.22, 'sine', 0.2, i * 0.12));
   const sfxLose = () => [400, 320, 240].forEach((f, i) => tone(f, 0.25, 'triangle', 0.16, i * 0.15));
 
-  // ---------- 关卡数据 ----------
   const LEVELS = [
     {
       ammo: 3,
-      blocks: [ {x: 700, y: 430, w: 180, h: 18, type:'wood'} ],
-      targets: [ {x: 790, y: 396, r: 26, hp: 2} ]
+      blocks: [ {x: 700, y: 472, w: 180, h: 18, type:'wood'} ],
+      targets: [ {x: 790, y: 446, r: 26, hp: 2} ]
     },
     {
       ammo: 3,
       blocks: [
-        {x: 660, y: 450, w: 30, h: 40, type:'stone'},
-        {x: 660, y: 410, w: 160, h: 18, type:'wood'},
-        {x: 720, y: 360, w: 30, h: 50, type:'stone'}
+        {x: 640, y: 450, w: 28, h: 40, type:'stone'},
+        {x: 820, y: 450, w: 28, h: 40, type:'stone'},
+        {x: 640, y: 432, w: 208, h: 18, type:'wood'}
       ],
-      targets: [ {x: 700, y: 376, r: 24, hp: 2}, {x: 800, y: 455, r: 24, hp: 2} ]
+      targets: [ {x: 744, y: 406, r: 24, hp: 2}, {x: 890, y: 466, r: 22, hp: 2} ]
+    },
+    {
+      ammo: 4,
+      blocks: [
+        {x: 720, y: 472, w: 120, h: 18, type:'wood'},
+        {x: 735, y: 454, w: 90, h: 18, type:'wood'},
+        {x: 748, y: 436, w: 64, h: 18, type:'wood'}
+      ],
+      targets: [ {x: 780, y: 410, r: 22, hp: 2}, {x: 870, y: 466, r: 22, hp: 2} ]
+    },
+    {
+      ammo: 4,
+      blocks: [
+        {x: 700, y: 472, w: 30, h: 18, type:'stone'},
+        {x: 760, y: 440, w: 30, h: 50, type:'stone'},
+        {x: 700, y: 422, w: 150, h: 18, type:'wood'}
+      ],
+      targets: [ {x: 730, y: 466, r: 22, hp: 2}, {x: 800, y: 396, r: 22, hp: 2} ]
+    },
+    {
+      ammo: 5,
+      blocks: [
+        {x: 620, y: 450, w: 28, h: 40, type:'stone'},
+        {x: 760, y: 450, w: 28, h: 40, type:'stone'},
+        {x: 620, y: 432, w: 168, h: 18, type:'wood'},
+        {x: 660, y: 472, w: 120, h: 18, type:'wood'}
+      ],
+      targets: [ {x: 688, y: 406, r: 22, hp: 2}, {x: 820, y: 466, r: 22, hp: 2}, {x: 890, y: 466, r: 22, hp: 2} ]
     }
   ];
 
@@ -115,6 +141,7 @@
   let blocks = [], targets = [], ammo = 3;
 
   const $lv = document.getElementById('lv');
+  const $lvTotal = document.getElementById('lvTotal');
   const $ammo = document.getElementById('ammo');
   const $targets = document.getElementById('targets');
   const overlay = document.getElementById('overlay');
@@ -128,11 +155,12 @@
     ammo = L.ammo;
     blocks = L.blocks.map(b => ({
       ...b, vx: 0, vy: 0, ang: 0, av: 0,
-      mass: b.type === 'stone' ? 3 : 1.2, landed: false
+      mass: b.type === 'stone' ? 3 : 1.2, landed: false, fixed: true
     }));
     targets = L.targets.map(t => ({...t, flash: 0}));
     ball = null;
     state = 'idle';
+    $lvTotal.textContent = LEVELS.length;
     updateHud();
     overlay.classList.add('hidden');
   }
@@ -196,6 +224,7 @@
   cv.addEventListener('touchend', e => { e.preventDefault(); endAim(); }, {passive:false});
 
   function stepBlock(b) {
+    if (b.fixed) return;
     b.vy += G;
     b.x += b.vx;
     b.y += b.vy;
@@ -205,9 +234,9 @@
       b.y = GROUND - half;
       if (!b.landed && Math.abs(b.vy) > 2) sfxLand();
       b.landed = true;
-      b.vy *= -0.25;
-      b.vx *= 0.8;
-      b.av *= 0.85;
+      b.vy *= -0.3;
+      b.vx *= 0.92;
+      b.av *= 0.92;
     } else {
       b.landed = false;
     }
@@ -216,6 +245,26 @@
     if (Math.abs(b.vx) < 0.02) b.vx = 0;
     if (Math.abs(b.av) < 0.002) b.av = 0;
     if (b.x < -300 || b.x > W + 300) b.vx = 0;
+  }
+
+  function overlap(a, b) {
+    return a.x < b.x + b.w && a.x + a.w > b.x &&
+           a.y < b.y + b.h && a.y + a.h > b.y;
+  }
+
+  function chainUnlock() {
+    for (const a of blocks) {
+      if (a.fixed) continue;
+      for (const b of blocks) {
+        if (!b.fixed) continue;
+        if (overlap(a, b)) {
+          b.fixed = false;
+          b.vx = a.vx * 0.7;
+          b.vy = a.vy * 0.7;
+          b.av += a.vx * 0.03;
+        }
+      }
+    }
   }
 
   function collideBlock(ball, blk) {
@@ -235,6 +284,7 @@
         ball.vy -= (1 + rest) * vn * uy;
         ball.vx *= 0.96; ball.vy *= 0.96;
         const impact = -vn;
+        blk.fixed = false;
         blk.vx += ux * impact * 0.9 / blk.mass;
         blk.vy += uy * impact * 0.9 / blk.mass;
         const rx = ball.x - (blk.x + blk.w / 2);
@@ -291,7 +341,9 @@
       else if (Math.abs(ball.vx) < 0.08 && ball.vy === 0 && ball.y >= GROUND - ball.r - 0.5) endBall();
     }
 
+    chainUnlock();
     for (const blk of blocks) stepBlock(blk);
+
     for (const blk of blocks) {
       for (const t of targets) {
         if (t.hp > 0 && rectCircle(blk, t)) {
@@ -322,7 +374,7 @@
     if (win) {
       sfxWin();
       ovTitle.textContent = '漂亮！全部命中';
-      ovText.textContent = level + 1 === LEVELS.length ? '你通过了全部关卡' : '准备进入下一关';
+      ovText.textContent = level + 1 === LEVELS.length ? '你通过了全部关卡！' : '准备进入下一关';
       ovBtn.textContent = level + 1 === LEVELS.length ? '再玩一次' : '下一关';
     } else {
       sfxLose();
